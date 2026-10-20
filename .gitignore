@@ -1,0 +1,21 @@
+# 运行时文件
+providers.json
+balances.txt
+bridge-state.txt
+native.log
+native.log.old
+*.tmp
+
+# 本地构建产物
+native/*.dll
+native/*.res.o
+native/*.o
+native/*.obj
+
+# 回退备份和发布包
+backups/
+dist/
+
+# 系统/编辑器文件
+Thumbs.db
+desktop.ini
