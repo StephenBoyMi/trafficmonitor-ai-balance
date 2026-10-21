@@ -42,6 +42,8 @@ namespace vb_options
         const int kClientHeight = 450;
         // 18 DIP 下系统默认的 U+25CF 圆点过大，改用小圆点。
         const wchar_t kPasswordChar = 0x2022;
+        // Token Plan 类型不需要 Base URL，这一格显示灰字“留空”并禁用。
+        const wchar_t kLeaveBlankText[] = L"留空";
 
         const COLORREF kColorText = RGB(0x11, 0x18, 0x27);
         const COLORREF kColorMuted = RGB(0x6B, 0x72, 0x80);
@@ -60,7 +62,9 @@ namespace vb_options
             { L"Sub2API 中转", L"sub2api" },
             { L"DeepSeek 官方", L"deepseek" },
             { L"Kimi 官方", L"moonshot" },
-            { L"One-API / New-API", L"oneapi" }
+            { L"One-API / New-API", L"oneapi" },
+            { L"千问 Token Plan（Cookie）", L"token_plan" },
+            { L"小米 Token Plan（Cookie）", L"xiaomi" }
         };
         const int kKindCount = static_cast<int>(sizeof(kKinds) / sizeof(kKinds[0]));
 
@@ -132,6 +136,8 @@ namespace vb_options
             OptionsHost host;
             TaskbarStyle style;
             std::vector<ProviderRow> rows;
+            // 与 rows 同序的当前数值，RefreshList 每次重建时刷新。
+            std::vector<std::wstring> values;
             int selected;
             bool loading;
             bool saved;
@@ -217,14 +223,16 @@ namespace vb_options
             return kind;
         }
 
-        // 左侧列表列窄，只显示短名；完整名称留给下拉框。
-        std::wstring KindShortLabel(const std::wstring& kind)
+        // Key 这一格对 Token Plan 类型存的是浏览器 Cookie，提示按类型给。
+        std::wstring KeyHint(const std::wstring& kind, bool hasValue)
         {
-            if (kind == L"sub2api") return L"Sub2API";
-            if (kind == L"deepseek") return L"DeepSeek";
-            if (kind == L"moonshot") return L"Kimi";
-            if (kind == L"oneapi") return L"One-API";
-            return KindLabel(kind);
+            if (kind == L"token_plan")
+            {
+                return hasValue ? L"已保存 Cookie；清空后保存即删除。"
+                    : L"请填写浏览器请求头里的 Cookie。";
+            }
+            return hasValue ? L"已保存 key；清空后保存即删除。"
+                : L"尚未设置 key。";
         }
 
         int KindIndex(const std::wstring& kind)
@@ -253,6 +261,31 @@ namespace vb_options
             return text;
         }
 
+        bool IsCookieKind(const std::wstring& kind)
+        {
+            return kind == L"token_plan" || kind == L"xiaomi";
+        }
+
+        void ApplyUrlFieldMode(DialogState* state, const std::wstring& kind, bool enabled)
+        {
+            if (state->urlEdit == nullptr)
+            {
+                return;
+            }
+            if (IsCookieKind(kind))
+            {
+                SetWindowTextW(state->urlEdit, kLeaveBlankText);
+                EnableWindow(state->urlEdit, FALSE);
+                return;
+            }
+            // 从 Cookie 类型切回来时把占位文字清掉，避免当成真实地址保存。
+            if (EditText(state->urlEdit) == kLeaveBlankText)
+            {
+                SetWindowTextW(state->urlEdit, L"");
+            }
+            EnableWindow(state->urlEdit, enabled ? TRUE : FALSE);
+        }
+
         void SetStatus(DialogState* state, const std::wstring& text, COLORREF color)
         {
             state->statusColor = color;
@@ -269,29 +302,52 @@ namespace vb_options
                 static_cast<WPARAM>(-1), LVNI_SELECTED));
         }
 
+        // 左侧列表名称后面带上当前数值；按 Id 对齐查询线程的快照。
+        std::wstring CompactValueFor(const ProviderRow& row,
+            const std::vector<ProviderValue>& view)
+        {
+            if (row.id.empty())
+            {
+                return std::wstring();
+            }
+            for (size_t i = 0; i < view.size(); ++i)
+            {
+                if (view[i].id == row.id && !view[i].compact.empty())
+                {
+                    return view[i].compact;
+                }
+            }
+            return std::wstring();
+        }
+
         void RefreshList(DialogState* state)
         {
             SendMessageW(state->list, LVM_DELETEALLITEMS, 0, 0);
+            std::vector<ProviderValue> view;
+            if (state->host.overview != nullptr)
+            {
+                view = state->host.overview();
+            }
+            state->values.assign(state->rows.size(), std::wstring());
             for (size_t i = 0; i < state->rows.size(); ++i)
             {
                 const ProviderRow& row = state->rows[i];
-                std::wstring name = row.name.empty() ? L"(未命名)" : row.name;
-                std::wstring kind = KindShortLabel(row.kind);
+                std::wstring text = row.name.empty() ? L"(未命名)" : row.name;
+                std::wstring& compact = state->values[i];
+                compact = CompactValueFor(row, view);
+                if (!compact.empty())
+                {
+                    text += L" · " + compact;
+                }
 
                 LVITEMW item;
                 ZeroMemory(&item, sizeof(item));
                 item.mask = LVIF_TEXT;
                 item.iItem = static_cast<int>(i);
                 item.iSubItem = 0;
-                item.pszText = &name[0];
+                item.pszText = &text[0];
                 SendMessageW(state->list, LVM_INSERTITEMW, 0,
                     reinterpret_cast<LPARAM>(&item));
-                LVITEMW sub;
-                ZeroMemory(&sub, sizeof(sub));
-                sub.iSubItem = 1;
-                sub.pszText = &kind[0];
-                SendMessageW(state->list, LVM_SETITEMTEXTW,
-                    static_cast<WPARAM>(i), reinterpret_cast<LPARAM>(&sub));
             }
 
             int count = static_cast<int>(state->rows.size());
@@ -321,9 +377,23 @@ namespace vb_options
             EnableWindow(state->nameEdit, enable);
             EnableWindow(state->kindCombo, enable);
             EnableWindow(state->urlEdit, enable);
+            if (hasSelection)
+            {
+                ApplyUrlFieldMode(state, state->rows[state->selected].kind, true);
+            }
             EnableWindow(state->keyEdit, enable);
             EnableWindow(state->showKeyCheck, enable);
             EnableWindow(state->testButton, state->test == nullptr ? enable : FALSE);
+        }
+
+        // 重建列表时屏蔽选中变化通知：增删行会让 ListView 先发出
+        // “全部取消选中”，那时若被当成用户切换，会把表单内容写进新行。
+        void RefreshListQuiet(DialogState* state)
+        {
+            bool wasLoading = state->loading;
+            state->loading = true;
+            RefreshList(state);
+            state->loading = wasLoading;
         }
 
         void UpdateSelectedTitle(DialogState* state)
@@ -334,15 +404,15 @@ namespace vb_options
             }
             const ProviderRow& row = state->rows[state->selected];
             std::wstring name = row.name.empty() ? L"(未命名)" : row.name;
-            std::wstring kind = KindShortLabel(row.kind);
+            if (state->selected < static_cast<int>(state->values.size())
+                && !state->values[state->selected].empty())
+            {
+                name += L" · " + state->values[state->selected];
+            }
             LVITEMW item;
             ZeroMemory(&item, sizeof(item));
             item.iSubItem = 0;
             item.pszText = &name[0];
-            SendMessageW(state->list, LVM_SETITEMTEXTW,
-                static_cast<WPARAM>(state->selected), reinterpret_cast<LPARAM>(&item));
-            item.iSubItem = 1;
-            item.pszText = &kind[0];
             SendMessageW(state->list, LVM_SETITEMTEXTW,
                 static_cast<WPARAM>(state->selected), reinterpret_cast<LPARAM>(&item));
         }
@@ -356,8 +426,11 @@ namespace vb_options
                 SetWindowTextW(state->nameEdit, row.name.c_str());
                 SendMessageW(state->kindCombo, CB_SETCURSEL,
                     static_cast<WPARAM>(KindIndex(row.kind)), 0);
-                SetWindowTextW(state->urlEdit, row.baseUrl.c_str());
                 SetWindowTextW(state->keyEdit, row.key.c_str());
+                // Cookie 类型的占位“留空”由 ApplyUrlFieldMode 统一写，避免两处重复。
+                SetWindowTextW(state->urlEdit, IsCookieKind(row.kind)
+                    ? L"" : row.baseUrl.c_str());
+                ApplyUrlFieldMode(state, row.kind, true);
             }
             else
             {
@@ -369,9 +442,8 @@ namespace vb_options
             state->loading = false;
             if (state->selected >= 0 && state->selected < static_cast<int>(state->rows.size()))
             {
-                SetStatus(state, state->rows[state->selected].key.empty()
-                    ? L"尚未设置 key。"
-                    : L"已保存 key；清空后保存即删除。", kColorMuted);
+                const ProviderRow& row = state->rows[state->selected];
+                SetStatus(state, KeyHint(row.kind, !row.key.empty()), kColorMuted);
             }
             else
             {
@@ -387,12 +459,18 @@ namespace vb_options
             }
             ProviderRow& row = state->rows[state->selected];
             row.name = EditText(state->nameEdit);
-            row.baseUrl = EditText(state->urlEdit);
             row.key = EditText(state->keyEdit);
             int kind = static_cast<int>(SendMessageW(state->kindCombo, CB_GETCURSEL, 0, 0));
             if (kind >= 0 && kind < kKindCount)
             {
                 row.kind = kKinds[kind].kind;
+            }
+            // Cookie 类型的这一格是禁用的占位“留空”，不参与提交；
+            // 原有地址保留在行里，切回其他类型时还能恢复。
+            std::wstring urlText = EditText(state->urlEdit);
+            if (!IsCookieKind(row.kind) && urlText != kLeaveBlankText)
+            {
+                row.baseUrl = urlText;
             }
         }
 
@@ -590,11 +668,11 @@ namespace vb_options
             CommitControlsToRow(state);
             ProviderRow row;
             row.id.clear();
-            row.name = L"新供应商";
+            // 新增一行就是全空，不预填名字；列表里显示“(未命名)”。
             row.kind = L"sub2api";
             state->rows.push_back(row);
             state->selected = static_cast<int>(state->rows.size()) - 1;
-            RefreshList(state);
+            RefreshListQuiet(state);
             LoadRowIntoControls(state);
             SetFocus(state->nameEdit);
             SendMessageW(state->nameEdit, EM_SETSEL, 0, static_cast<LPARAM>(-1));
@@ -613,7 +691,7 @@ namespace vb_options
             {
                 state->selected = static_cast<int>(state->rows.size()) - 1;
             }
-            RefreshList(state);
+            RefreshListQuiet(state);
             LoadRowIntoControls(state);
             SetStatus(state, L"已删除“" + name + L"”，请点击保存生效。", kColorMuted);
         }
@@ -621,6 +699,14 @@ namespace vb_options
         void OnSave(DialogState* state)
         {
             CommitControlsToRow(state);
+            // Cookie 类型在界面上固定“留空”，落盘也写成空串。
+            for (size_t i = 0; i < state->rows.size(); ++i)
+            {
+                if (IsCookieKind(state->rows[i].kind))
+                {
+                    state->rows[i].baseUrl.clear();
+                }
+            }
             std::wstring error;
             bool ok = state->host.saveRows != nullptr && state->host.saveRows(state->rows, error);
             if (ok)
@@ -659,6 +745,12 @@ namespace vb_options
             {
                 return;
             }
+            // 刷新列表时的中间选中态（例如清空列表瞬间回到 -1）不是用户操作，
+            // 放过去会把当前表单内容提交到刚新增的那一行上。
+            if (state->loading)
+            {
+                return;
+            }
             int index = SelectedIndex(state);
             if (index == state->selected)
             {
@@ -677,6 +769,11 @@ namespace vb_options
             EnableWindow(state->showKeyCheck, hasSelection ? TRUE : FALSE);
             EnableWindow(state->testButton,
                 state->test == nullptr && hasSelection ? TRUE : FALSE);
+            // 统一 EnableWindow 会重新放开 Cookie 类型的 Base URL，这里按类型收回去。
+            if (hasSelection)
+            {
+                ApplyUrlFieldMode(state, state->rows[index].kind, true);
+            }
         }
 
         int HitTestTarget(DialogState* state, POINT dialogPoint)
@@ -771,7 +868,7 @@ namespace vb_options
             }
             state->rows.insert(state->rows.begin() + to, moved);
             state->selected = to;
-            RefreshList(state);
+            RefreshListQuiet(state);
             LoadRowIntoControls(state);
             SetStatus(state, L"顺序已调整，保存后生效。", kColorMuted);
         }
@@ -785,7 +882,7 @@ namespace vb_options
                 250, 78, 100, 26, 0, state->font);
             MakeControl(state, L"STATIC", L"Base URL", SS_LEFT, 0,
                 250, 114, 100, 26, 0, state->font);
-            MakeControl(state, L"STATIC", L"Key", SS_LEFT, 0,
+            MakeControl(state, L"STATIC", L"Key/Cookie", SS_LEFT, 0,
                 250, 150, 100, 26, 0, state->font);
 
             MakeControl(state, L"STATIC", L"1. 一次一家：余额 / 今日消费。",
@@ -836,7 +933,10 @@ namespace vb_options
             SendMessageW(state->keyEdit, EM_SETPASSWORDCHAR,
                 static_cast<WPARAM>(kPasswordChar), 0);
 
-            state->status = MakeControl(state, L"STATIC", L"", SS_LEFT, 0,
+            // 单行 + 省略号：SS_LEFT 的 STATIC 会自动折行，长错误信息会压到下面的
+            // “轮换规则”分组框上；加了 SS_ENDELLIPSIS 后超长内容收成一行。
+            state->status = MakeControl(state, L"STATIC", L"",
+                SS_LEFT | SS_ENDELLIPSIS, 0,
                 250, 191, 344, 26, IDC_STATUS, state->hintFont);
 
             state->sample = MakeControl(state, L"STATIC", L"", SS_OWNERDRAW, 0,
@@ -906,7 +1006,7 @@ namespace vb_options
                 state->rows = state->host.loadRows != nullptr
                     ? state->host.loadRows() : std::vector<ProviderRow>();
                 state->selected = state->rows.empty() ? -1 : 0;
-                RefreshList(state);
+                RefreshListQuiet(state);
                 LoadRowIntoControls(state);
                 if (state->rows.empty())
                 {
@@ -943,6 +1043,24 @@ namespace vb_options
                     {
                         CommitControlsToRow(state);
                         UpdateSelectedTitle(state);
+                        if (state->selected >= 0
+                            && state->selected < static_cast<int>(state->rows.size()))
+                        {
+                            const ProviderRow& row = state->rows[state->selected];
+                            // 切换类型时先摘掉占位/恢复地址，期间不要让
+                            // EN_CHANGE 把中间态提交回行里。
+                            bool wasLoading = state->loading;
+                            state->loading = true;
+                            ApplyUrlFieldMode(state, row.kind, true);
+                            if (!IsCookieKind(row.kind))
+                            {
+                                // 从 Cookie 类型切回来时恢复这一行原来的地址。
+                                SetWindowTextW(state->urlEdit, row.baseUrl.c_str());
+                            }
+                            state->loading = wasLoading;
+                            SetStatus(state, KeyHint(row.kind, !row.key.empty()),
+                                kColorMuted);
+                        }
                     }
                     return 0;
                 case IDC_NAME:

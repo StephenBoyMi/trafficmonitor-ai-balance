@@ -43,15 +43,26 @@ namespace
         double balance;
         double spentToday;
         bool spentIsOfficial;
+        // Token Plan 返回的是周期用量比例而不是金额；周期由查询结果决定。
+        bool weeklyPeriod;
         std::string day;
         unsigned long long lastChangeTicks;
+        // 最近一次失败原因：非空时列表里的数值显示“失败”。
+        std::string lastError;
 
         Provider()
             : sortOrder(0), hasBalance(false), balance(0), spentToday(0),
-              spentIsOfficial(false), lastChangeTicks(0)
+              spentIsOfficial(false), weeklyPeriod(false), lastChangeTicks(0)
         {
         }
     };
+
+    // 任务栏按百分比显示的类型；判定只看类型，不依赖本次查询是否成功，
+    // 否则重启后读到旧状态会先按金额格式闪一次。
+    bool IsPercentProvider(const Provider& provider)
+    {
+        return provider.kind == "token_plan" || provider.kind == "xiaomi";
+    }
 
     HMODULE g_module = nullptr;
     ITrafficMonitor* g_app = nullptr;
@@ -72,6 +83,9 @@ namespace
     bool g_textLockInitialized = false;
     std::wstring g_slot1Text;
     std::wstring g_slot2Text;
+    CRITICAL_SECTION g_viewLock;
+    bool g_viewLockInitialized = false;
+    std::vector<vb_options::ProviderValue> g_viewRows;
     DWORD g_lastRefreshTick = 0;
     size_t g_rotationIndex = 0;
 
@@ -293,6 +307,13 @@ namespace
     {
         char buffer[64];
         snprintf(buffer, sizeof(buffer), "%.2f", value);
+        return std::string(buffer);
+    }
+
+    std::string PercentText1(double value)
+    {
+        char buffer[64];
+        snprintf(buffer, sizeof(buffer), "%.1f", value);
         return std::string(buffer);
     }
 
@@ -710,10 +731,14 @@ namespace
         }
         if (result.status < 200 || result.status >= 300)
         {
+            // 对话框状态行只有一行（344 DIP ≈ 24 个汉字），响应体写日志，
+            // 界面只给“哪一步失败 + 看日志”的短结论。
+            Log(L"HTTP " + std::to_wstring(result.status) + L" "
+                + WideFromUtf8(labelUtf8) + L"：" + WideFromUtf8(ClipBody(result.body, 400)));
             // labelUtf8 与 error 都按 UTF-8 传递；这里不能先转 ANSI，
             // 否则中文供应商名会在日志和测试结果里变成乱码。
-            error = labelUtf8 + " HTTP " + std::to_string(result.status) + "："
-                + ClipBody(result.body, 180);
+            error = labelUtf8 + " HTTP " + std::to_string(result.status)
+                + "，详见日志";
             return false;
         }
         return true;
@@ -945,6 +970,288 @@ namespace
         return true;
     }
 
+    // ---- 千问 Token Plan 个人版：控制台接口只认浏览器登录 Cookie ----
+    //
+    // 取证来源（2026-10-20 实测 platform.qianwenai.com 个人版用量页）：
+    //   1) GET  https://platform-home.qianwenai.com/tool/user/info.json
+    //      -> data.secToken（网关要求的表单字段），data.sessionExpireTimeStamp
+    //   2) POST https://cs-data.qianwenai.com/data/api.json
+    //           ?product=sfm_bailian&action=BroadScopeAspnGateway&api=<Api>
+    //      表单 product/action/sec_token/region/params，params 里必须带
+    //      V=1.0 和 Data.cornerstoneParam，否则网关回 Bad Request。
+    //   用量字段 data.DataV2.data.data.per1WeekPercentage / per1MonthPercentage
+    //   是 0-1 的比例；个人版 lite 档只有月度字段。
+    // 控制台 Cookie 失效时的统一文案：状态行只有一行，太长会被省略。
+    const char kCookieExpiredError[] = "Cookie 已失效，请重新登录后复制";
+
+    const char kTokenPlanHome[] = "https://platform-home.qianwenai.com";
+    const char kTokenPlanGateway[] = "https://cs-data.qianwenai.com";
+    const char kTokenPlanOrigin[] = "https://platform.qianwenai.com";
+    const char kTokenPlanApi[] =
+        "zeldaHttp.apikeyMgr./tokenplan/personal/api/v2/usage";
+    // 网关要求 params 里同时带 Api、cornerstoneParam 和 V=1.0，缺一个就 Bad Request。
+    std::string TokenPlanParams()
+    {
+        std::string params = "{\"Api\":\"";
+        params += kTokenPlanApi;
+        params += "\",\"Data\":{\"cornerstoneParam\":{\"domain\":\"platform.qianwenai.com\","
+            "\"consoleSite\":\"QIANWENAI\",\"console\":\"ONE_CONSOLE\","
+            "\"xsp_lang\":\"zh-CN\",\"protocol\":\"V2\",\"productCode\":\"p_efm\"}},"
+            "\"V\":\"1.0\"}";
+        return params;
+    }
+
+    std::string UrlEncode(const std::string& text)
+    {
+        static const char kHex[] = "0123456789ABCDEF";
+        std::string out;
+        for (size_t i = 0; i < text.size(); ++i)
+        {
+            unsigned char ch = static_cast<unsigned char>(text[i]);
+            bool safe = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z')
+                || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_'
+                || ch == '.' || ch == '~';
+            if (safe)
+            {
+                out.push_back(static_cast<char>(ch));
+            }
+            else
+            {
+                out.push_back('%');
+                out.push_back(kHex[ch >> 4]);
+                out.push_back(kHex[ch & 15]);
+            }
+        }
+        return out;
+    }
+
+    bool ParseSecToken(const std::string& body, std::string& secToken,
+        double& expireStamp, std::string& error)
+    {
+        JsonValue root;
+        if (!ParseJson(body, root, error) || !root.IsObject())
+        {
+            error = "登录信息响应不是 JSON，Cookie 可能已失效";
+            return false;
+        }
+        const JsonValue* data = root.Get("data");
+        if (data == nullptr || !data->IsObject())
+        {
+            // 未登录时接口返回 {"code":"ConsoleNeedLogin","message":"请登录"}，
+            // 没有 data，这里把原因写清楚，免得日志只说“解析失败”。
+            std::string code = JsonString(root, "code");
+            std::string message = JsonString(root, "message");
+            if (code == "ConsoleNeedLogin")
+            {
+                error = kCookieExpiredError;
+            }
+            else
+            {
+                error = "登录信息响应缺少 data" + (message.empty()
+                    ? std::string("：" + ClipBody(body, 160))
+                    : std::string("：") + message);
+            }
+            return false;
+        }
+        secToken = JsonString(*data, "secToken");
+        if (secToken.empty())
+        {
+            error = kCookieExpiredError;
+            return false;
+        }
+        JsonNumber(data, "sessionExpireTimeStamp", expireStamp);
+        return true;
+    }
+
+    bool ParseTokenPlanUsage(const std::string& body, double& percentage,
+        bool& weekly, std::string& error)
+    {
+        JsonValue root;
+        if (!ParseJson(body, root, error) || !root.IsObject())
+        {
+            error = "用量响应不是 JSON 对象";
+            return false;
+        }
+        const JsonValue* data = root.Get("data");
+        const JsonValue* dataV2 = data == nullptr ? nullptr : data->Get("DataV2");
+        const JsonValue* inner = dataV2 == nullptr ? nullptr : dataV2->Get("data");
+        const JsonValue* usage = inner == nullptr ? nullptr : inner->Get("data");
+        if (usage == nullptr || !usage->IsObject())
+        {
+            std::string message = data == nullptr ? std::string()
+                : JsonString(*data, "errorMsg");
+            if (message.find("NotLogined") != std::string::npos)
+            {
+                error = kCookieExpiredError;
+            }
+            else
+            {
+                // 网关原文可能很长，写日志；界面只给短结论。
+                Log(L"Token Plan 网关响应：" + WideFromUtf8(ClipBody(body, 400)));
+                error = message.empty() ? "用量响应缺少字段，详见日志"
+                    : "网关返回错误，详见日志";
+            }
+            return false;
+        }
+        if (JsonNumber(usage, "per1WeekPercentage", percentage))
+        {
+            weekly = true;
+        }
+        else if (JsonNumber(usage, "per1MonthPercentage", percentage))
+        {
+            weekly = false;
+        }
+        else
+        {
+            Log(L"Token Plan 用量响应：" + WideFromUtf8(ClipBody(body, 400)));
+            error = "用量响应缺少百分比，详见日志";
+            return false;
+        }
+        if (!(percentage >= 0.0 && percentage <= 1.0))
+        {
+            error = "用量比例超出 0-1：" + NumberRaw(percentage);
+            return false;
+        }
+        return true;
+    }
+
+    // 比例型用量（0-1）统一折算成“剩余/已用百分比”，并标记为官方口径。
+    void ApplyPercentUsage(Provider& provider, double percentage, bool weekly)
+    {
+        provider.weeklyPeriod = weekly;
+        provider.balance = (1.0 - percentage) * 100.0;
+        provider.spentToday = percentage * 100.0;
+        provider.spentIsOfficial = true;
+    }
+
+    bool QueryTokenPlan(Provider& provider, std::string& error)
+    {
+        std::wstring origin = WideFromUtf8(kTokenPlanOrigin);
+
+        HttpResult info = HttpGetWithCookie(
+            WideFromUtf8(kTokenPlanHome) + L"/tool/user/info.json",
+            provider.key, origin);
+        if (!EnsureHttpOk(info, provider.name, error))
+        {
+            return false;
+        }
+        std::string secToken;
+        double expireStamp = 0;
+        if (!ParseSecToken(info.body, secToken, expireStamp, error))
+        {
+            return false;
+        }
+
+        std::string body;
+        body += "product=sfm_bailian&action=BroadScopeAspnGateway&sec_token=";
+        body += UrlEncode(secToken);
+        body += "&region=cn-beijing&params=";
+        body += UrlEncode(TokenPlanParams());
+
+        std::wstring url = WideFromUtf8(kTokenPlanGateway)
+            + L"/data/api.json?product=sfm_bailian&action=BroadScopeAspnGateway&api="
+            + WideFromUtf8(UrlEncode(kTokenPlanApi));
+        HttpResult usage = HttpPostForm(url, body, provider.key, origin);
+        if (!EnsureHttpOk(usage, provider.name, error))
+        {
+            return false;
+        }
+        double percentage = 0;
+        bool weekly = false;
+        if (!ParseTokenPlanUsage(usage.body, percentage, weekly, error))
+        {
+            return false;
+        }
+        ApplyPercentUsage(provider, percentage, weekly);
+        if (expireStamp > 0)
+        {
+            // 把会话到期时间写进日志：Cookie 失效前用户能看到还剩多久。
+            time_t expireTime = static_cast<time_t>(expireStamp / 1000.0);
+            struct tm* expireTm = localtime(&expireTime);
+            if (expireTm != nullptr)
+            {
+                wchar_t text[96];
+                swprintf(text, 96,
+                    L"Token Plan 登录会话到期 %4d-%02d-%02d %02d:%02d",
+                    expireTm->tm_year + 1900, expireTm->tm_mon + 1,
+                    expireTm->tm_mday, expireTm->tm_hour, expireTm->tm_min);
+                Log(text);
+            }
+        }
+        return true;
+    }
+
+    // ---- 小米 MiMo 开放平台：TokenPlan 用量同样只认控制台 Cookie ----
+    //
+    // 实测（2026-10-21）：
+    //   GET https://platform.xiaomimimo.com/api/v1/tokenPlan/usage
+    //   -> data.monthUsage.percent（0-1）、data.monthUsage.items[0]
+    //      { name:"month_total_token", used, limit, percent }
+    //   未登录返回 HTTP 401 + {"code":401,"loginUrl":...}。
+    const char kXiaomiBase[] = "https://platform.xiaomimimo.com";
+
+    bool ParseXiaomiUsage(const std::string& body, double& percentage, std::string& error)
+    {
+        JsonValue root;
+        if (!ParseJson(body, root, error) || !root.IsObject())
+        {
+            error = "用量响应不是 JSON 对象";
+            return false;
+        }
+        double code = 0;
+        if (JsonNumber(&root, "code", code) && code != 0)
+        {
+            Log(L"小米网关响应：" + WideFromUtf8(ClipBody(body, 300)));
+            error = "小米返回错误，详见日志";
+            return false;
+        }
+        const JsonValue* data = root.Get("data");
+        const JsonValue* month = data == nullptr ? nullptr : data->Get("monthUsage");
+        const JsonValue* usage = data == nullptr ? nullptr : data->Get("usage");
+        bool found = month != nullptr && JsonNumber(month, "percent", percentage);
+        if (!found)
+        {
+            found = usage != nullptr && JsonNumber(usage, "percent", percentage);
+        }
+        if (!found)
+        {
+            Log(L"小米用量响应：" + WideFromUtf8(ClipBody(body, 300)));
+            error = "用量响应缺少百分比，详见日志";
+            return false;
+        }
+        if (!(percentage >= 0.0 && percentage <= 1.0))
+        {
+            error = "用量比例超出 0-1：" + NumberRaw(percentage);
+            return false;
+        }
+        return true;
+    }
+
+    bool QueryXiaomi(Provider& provider, std::string& error)
+    {
+        std::wstring origin = WideFromUtf8(kXiaomiBase);
+        HttpResult result = HttpGetWithCookie(
+            WideFromUtf8(kXiaomiBase) + L"/api/v1/tokenPlan/usage",
+            provider.key, origin);
+        if (result.status == 401)
+        {
+            // 未登录时返回 401 + loginUrl，直接给结论，不把重定向串塞进界面。
+            error = kCookieExpiredError;
+            return false;
+        }
+        if (!EnsureHttpOk(result, provider.name, error))
+        {
+            return false;
+        }
+        double percentage = 0;
+        if (!ParseXiaomiUsage(result.body, percentage, error))
+        {
+            return false;
+        }
+        ApplyPercentUsage(provider, percentage, false);
+        return true;
+    }
+
     bool QueryProvider(Provider& provider, std::string& error)
     {
         error.clear();
@@ -956,6 +1263,16 @@ namespace
         std::string label = provider.name;
         std::wstring base;
         HttpResult result;
+
+        if (provider.kind == "token_plan")
+        {
+            return QueryTokenPlan(provider, error);
+        }
+
+        if (provider.kind == "xiaomi")
+        {
+            return QueryXiaomi(provider, error);
+        }
 
         if (provider.kind == "deepseek")
         {
@@ -1295,6 +1612,15 @@ namespace
         {
             return L"OA";
         }
+        if (name == L"千问" || name == L"Token Plan" || name == L"Qianwen"
+            || name == L"Qwen")
+        {
+            return L"QW";
+        }
+        if (name == L"小米" || name == L"MiMo" || name == L"Xiaomi")
+        {
+            return L"MI";
+        }
 
         std::wstring abbr;
         bool lastWasLatin = false;
@@ -1335,9 +1661,20 @@ namespace
             std::wstring abbr = ProviderAbbr(shown->name);
             std::wstring balanceField;
             std::wstring spentField;
-            FormatAmountPair(shown->balance, shown->spentToday, balanceField, spentField);
-            line1 = abbr + L"(余额): " + balanceField;
-            line2 = abbr + L"(今日): " + spentField;
+            if (IsPercentProvider(*shown))
+            {
+                // Token Plan 没有金额，两行都是百分比。
+                line1 = abbr + L"(剩余): " + WideFromUtf8(PercentText1(shown->balance))
+                    + L"%";
+                line2 = abbr + (shown->weeklyPeriod ? L"(本周): " : L"(本月): ")
+                    + WideFromUtf8(PercentText1(shown->spentToday)) + L"%";
+            }
+            else
+            {
+                FormatAmountPair(shown->balance, shown->spentToday, balanceField, spentField);
+                line1 = abbr + L"(余额): " + balanceField;
+                line2 = abbr + L"(今日): " + spentField;
+            }
         }
         SetSlotTexts(line1, line2);
 
@@ -1403,6 +1740,42 @@ namespace
         }
     }
 
+    // 查询线程存一份“每家当前数值”的快照，对话框只读这份快照，不直接遍历
+    // g_providers，避免和查询线程抢同一份数据。
+    void RebuildValueSnapshot()
+    {
+        std::vector<vb_options::ProviderValue> rows;
+        for (size_t i = 0; i < g_providers.size(); ++i)
+        {
+            const Provider& provider = g_providers[i];
+            vb_options::ProviderValue row;
+            row.id = WideFromUtf8(provider.id);
+            if (!provider.lastError.empty())
+            {
+                row.compact = L"失败";
+            }
+            else if (!provider.hasBalance)
+            {
+                row.compact = L"--";
+            }
+            else if (IsPercentProvider(provider))
+            {
+                row.compact = L"剩 " + WideFromUtf8(PercentText1(provider.balance)) + L"%";
+            }
+            else
+            {
+                row.compact = WideFromUtf8(AmountText2(provider.balance));
+            }
+            rows.push_back(row);
+        }
+        if (g_viewLockInitialized)
+        {
+            EnterCriticalSection(&g_viewLock);
+            g_viewRows.swap(rows);
+            LeaveCriticalSection(&g_viewLock);
+        }
+    }
+
     void RefreshOnce()
     {
         CheckProvidersChanged();
@@ -1418,9 +1791,11 @@ namespace
             std::string error;
             if (!QueryProvider(provider, error))
             {
+                provider.lastError = error;
                 Log(L"查询 " + WideFromUtf8(provider.name) + L" 失败：" + WideFromUtf8(error));
                 continue;
             }
+            provider.lastError.clear();
 
             if (provider.spentIsOfficial)
             {
@@ -1521,6 +1896,7 @@ namespace
 
         WriteBalances(shown);
         WriteState();
+        RebuildValueSnapshot();
         g_lastRefreshTick = GetTickCount();
     }
 
@@ -1767,12 +2143,35 @@ namespace
         std::string error;
         if (!QueryProvider(provider, error))
         {
+            // 对话框只显示一行（超长会省略），完整原因留在日志里。
+            Log(L"测试连接 " + WideFromUtf8(provider.name) + L" 失败："
+                + WideFromUtf8(error));
             result = L"测试失败：" + WideFromUtf8(error);
             return false;
         }
-        result = L"余额 " + WideFromUtf8(AmountText2(provider.balance))
-            + L"，连接正常。";
+        if (IsPercentProvider(provider))
+        {
+            result = L"剩余 " + WideFromUtf8(PercentText1(provider.balance))
+                + L"%，连接正常。";
+        }
+        else
+        {
+            result = L"余额 " + WideFromUtf8(AmountText2(provider.balance))
+                + L"，连接正常。";
+        }
         return true;
+    }
+
+    std::vector<vb_options::ProviderValue> OptionsOverview()
+    {
+        std::vector<vb_options::ProviderValue> rows;
+        if (g_viewLockInitialized)
+        {
+            EnterCriticalSection(&g_viewLock);
+            rows = g_viewRows;
+            LeaveCriticalSection(&g_viewLock);
+        }
+        return rows;
     }
 
     int OptionsHostDpi()
@@ -1919,7 +2318,8 @@ namespace
         OptionsTestRow,
         Log,
         OptionsHostDpi,
-        OptionsTaskbarStyle
+        OptionsTaskbarStyle,
+        OptionsOverview
     };
     volatile LONG g_optionsBusy = 0;
 
@@ -2025,6 +2425,8 @@ namespace
             InitPaths();
             InitializeCriticalSection(&g_textLock);
             g_textLockInitialized = true;
+            InitializeCriticalSection(&g_viewLock);
+            g_viewLockInitialized = true;
             LoadCachedBalances();
             g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
             g_reloadEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
@@ -2065,6 +2467,11 @@ namespace
                 DeleteCriticalSection(&g_textLock);
                 g_textLockInitialized = false;
             }
+            if (g_viewLockInitialized)
+            {
+                DeleteCriticalSection(&g_viewLock);
+                g_viewLockInitialized = false;
+            }
         }
 
         IPluginItem* GetItem(int index) override
@@ -2097,7 +2504,7 @@ namespace
             case TMI_COPYRIGHT:
                 return L"© 2026 StephenBoyMi";
             case TMI_VERSION:
-                return L"2.1.0";
+                return L"2.2.0";
             case TMI_URL:
                 return L"https://github.com/StephenBoyMi/trafficmonitor-ai-balance";
             default:

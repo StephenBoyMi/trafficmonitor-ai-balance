@@ -36,6 +36,13 @@ namespace vb_options
         }
     };
 
+    // 查询线程快照里的一行：左侧列表按 Id 取用，只显示一个短数值。
+    struct ProviderValue
+    {
+        std::wstring id;
+        std::wstring compact;   // 如 "1.03"、"剩 72.2%"、"失败"
+    };
+
     // 由原生插件（AIBalanceNative.cpp）实现的回调集合。
     // 约定：除 testRow 在工作线程调用外，其余都在对话框线程调用；
     //      所有回调都不得读写插件的 g_providers，避免与查询线程竞争。
@@ -48,6 +55,8 @@ namespace vb_options
         void (*log)(const std::wstring& message) = nullptr;
         int (*hostDpi)() = nullptr;     // 宿主窗口的 DPI，取不到时返回 0
         void (*taskbarStyle)(TaskbarStyle& style) = nullptr;   // 读宿主任务栏外观
+        // 读查询线程的快照，用于在左侧列表里带上当前数值。
+        std::vector<ProviderValue> (*overview)() = nullptr;
     };
 
     // 以模态方式打开对话框。

@@ -9,9 +9,10 @@
 - 任务栏两行：第一行余额，第二行今日消费
 - 一次显示一家；15 分钟内余额有变化的多家供应商每 30 秒轮换
 - 支持 Sub2API、DeepSeek、Kimi、One-API
+- 支持千问 Token Plan 和小米 Token Plan 用量：第一行剩余百分比，第二行本周或本月已用百分比
 - 今日消费优先使用官方用量；DeepSeek、Kimi 使用余额差
-- 内置供应商管理：新增、编辑、删除、拖动排序、测试连接、保存
-- Key 使用 Windows DPAPI 加密，仅当前 Windows 用户可解密
+- 内置供应商管理：新增、编辑、删除、拖动排序、测试连接、保存；列表里每家名称后面带当前数值，一处看全所有供应商
+- Key 和 Cookie 使用 Windows DPAPI 加密，仅当前 Windows 用户可解密
 
 ## 安装
 
@@ -35,6 +36,10 @@
 | DeepSeek 官方 | `balance_infos[].total_balance` | 余额下降估算 |
 | Kimi / Moonshot 官方 | `data.available_balance` | 余额下降估算 |
 | One-API / New-API | `hard_limit_usd - total_usage / 100` | 官方当天用量 |
+| 千问 Token Plan 个人版 | 100% − 周期已用比例 | 官方周期已用比例 |
+| 小米 Token Plan | 100% − 本月已用比例 | 官方本月已用比例 |
+
+Token Plan 没有金额余额，两行都按百分比显示，第二行的周期取接口返回：有 `per1WeekPercentage` 显示“本周”，否则显示“本月”。小米 Token Plan 只有月度字段，第二行固定“本月”。
 
 ## 显示规则
 
@@ -43,10 +48,11 @@
 3. 15 分钟内没有变化时，继续显示最近变化的一家。
 4. DeepSeek、Kimi 的今日消费按当天余额下降累加，充值不冲减，跨天归零。
 5. 查询失败保留上次成功的显示；查询线程 15 分钟未完成刷新时显示 `--`。
+6. Token Plan 用百分比代替金额，且不使用余额差估算。
 
 ### 缩写
 
-`DeepSeek` → `DS`，`VANKIT` → `VK`，`逐梦` → `ZM`，`Kimi` / `Moonshot` → `KM`，`One-API` / `New-API` → `OA`；其他名称取英文首字母或前两个汉字。金额保留两位小数，并按整数位宽补空格对齐。
+`DeepSeek` → `DS`，`VANKIT` → `VK`，`逐梦` → `ZM`，`Kimi` / `Moonshot` → `KM`，`One-API` / `New-API` → `OA`，`千问` / `Qwen` / `Token Plan` → `QW`，`小米` / `MiMo` → `MI`；其他名称取英文首字母或前两个汉字。金额保留两位小数，并按整数位宽补空格对齐。
 
 ## 供应商管理
 
@@ -56,6 +62,17 @@
 - “测试连接”返回真实接口结果
 - 保存后查询立即重载
 - Esc 或“关闭”退出；未保存不写文件
+
+### Cookie 类型（千问 / 小米）
+
+这两个平台的用量接口都只认浏览器登录状态，不提供 API Key 查询，所以要把 Cookie 交给插件。千问在 `platform.qianwenai.com`，小米在 `platform.xiaomimimo.com`：
+
+1. 用浏览器登录 `https://platform.qianwenai.com`。
+2. F12 打开开发者工具，切到“网络”，刷新用量页：千问任选一条 `data/api.json` 请求，小米选 `/api/v1/tokenPlan/usage`。
+3. 在“请求标头”中复制 `cookie:` 后面的整行内容。
+4. 类型选“千问 Token Plan（Cookie）”或“小米 Token Plan（Cookie）”，Base URL 显示灰色“留空”，在 Key/Cookie 里粘贴这行 Cookie，先“测试连接”，再“保存”。
+
+登录态到期后接口会返回未登录，界面提示“Cookie 已失效，请重新登录后复制”。千问的会话到期时间会写进 `native.log`（“Token Plan 登录会话到期 …”）。到期后在浏览器重新登录、再复制一次 Cookie 即可。插件不读取浏览器数据，也不自动续期。
 
 ### 刷新间隔
 
@@ -67,18 +84,18 @@
 
 | 文件 | 内容 |
 |---|---|
-| `providers.json` | 供应商配置和 DPAPI 加密的 Key |
+| `providers.json` | 供应商配置和 DPAPI 加密的 Key / Cookie |
 | `native.log` | 查询日志，超过 1 MB 轮转 |
 | `balances.txt` | 最近一次两行显示文本 |
 | `bridge-state.txt` | 上次余额、变化时间和今日消费基准 |
 
-Key 只以 DPAPI 密文保存在本机，绑定当前 Windows 用户。仓库和发布包不包含 `providers.json`、Key、日志或余额数据。
+Key 和 Cookie 只以 DPAPI 密文保存在本机，绑定当前 Windows 用户。仓库和发布包不包含 `providers.json`、Key、Cookie、日志或余额数据。
 
 ## 插件信息
 
 - 名称：TrafficMonitor AI Balance
 - 作者：StephenBoyMi
-- 版本：2.1.0
+- 版本：2.2.0
 - 链接：https://github.com/StephenBoyMi/trafficmonitor-ai-balance
 
 ## 从源码构建

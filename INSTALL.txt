@@ -1,0 +1,46 @@
+TrafficMonitor AI Balance 安装说明
+
+文件
+- native\AIBalanceNative.dll   TrafficMonitor 原生插件（x64，含供应商管理）
+- native\AIBalanceNative.ini   运行配置
+- README.md、preview-plugin.png、preview-dialog.png
+
+安装
+1. 关闭 TrafficMonitor。
+2. 把 native\AIBalanceNative.dll 和 native\AIBalanceNative.ini 复制到
+   TrafficMonitor 的 plugins 目录。
+3. 启动 TrafficMonitor，在显示设置里勾选“AI 余额”和“AI 今日消费”。
+4. 双击任务栏里的余额项，打开供应商管理；新增供应商，填写类型、站点地址和
+   API Key，点“测试连接”确认能查到余额，再点“保存”。
+5. 最多 30 秒后任务栏出现余额。
+6. 想看全部供应商：再双击打开供应商设置，左侧列表每行是“名称 · 当前数值”，
+   数值来自最近一次查询，查询失败的行显示“失败”。
+
+千问 Token Plan / 小米 Token Plan
+类型选“千问 Token Plan（Cookie）”或“小米 Token Plan（Cookie）”，Base URL 显示灰色
+“留空”，在 Key/Cookie 里粘贴浏览器请求头里的整行 Cookie：千问登录
+platform.qianwenai.com 后复制 data/api.json 请求的 Cookie，小米登录
+platform.xiaomimimo.com 后复制 /api/v1/tokenPlan/usage 请求的 Cookie。
+这两种类型没有金额，任务栏显示 TP(剩余): 76.0% / TP(本月): 24.0%，
+或 XM(剩余): 22.2% / XM(本月): 78.0%。登录态到期后在浏览器重新登录，
+再复制一次 Cookie 即可；千问的会话到期时间会写进 native.log。
+
+运行文件
+默认在 DLL 同目录读写：
+- providers.json      供应商配置和 DPAPI 加密的 Key / Cookie
+- native.log          查询日志（超过 1 MB 自动轮转）
+- balances.txt        最近一次两行显示文本，供启动缓存
+- bridge-state.txt    上次余额、变化时间和今日消费基准
+
+如果 plugins 目录不可写，请在 AIBalanceNative.ini 的 [paths] 下把
+providers 和 log 改成有写权限的绝对路径。
+
+注意
+- 压缩包和仓库不包含 providers.json，也不包含任何 API Key 或 Cookie。
+- Key 和 Cookie 使用 Windows DPAPI 加密，绑定当前 Windows 用户；换用户或换机器
+  需要重新录入。
+- 不需要修改 TrafficMonitor 的 double_click_action；双击余额项由插件自己处理。
+- 卸载：关闭 TrafficMonitor，删除 plugins 目录里的 AIBalanceNative.dll 和
+  AIBalanceNative.ini，以及同目录的 providers.json 和日志即可。
+
+项目主页：https://github.com/StephenBoyMi/trafficmonitor-ai-balance
