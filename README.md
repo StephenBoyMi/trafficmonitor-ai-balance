@@ -11,7 +11,7 @@
 - 支持 Sub2API、DeepSeek、Kimi、One-API
 - 支持千问 Token Plan 和小米 Token Plan 用量：第一行剩余百分比，第二行本周或本月已用百分比
 - 今日消费优先使用官方用量；DeepSeek、Kimi 使用余额差
-- 内置供应商管理：新增、编辑、删除、拖动排序、测试连接、保存；列表里每家名称后面带当前数值，一处看全所有供应商
+- 内置供应商管理：新增、编辑、删除、拖动排序、测试连接、保存；列表里每家名称后面带当前数值，一处看全所有供应商；窗口已开着时再双击，会把它带到前台
 - Key 和 Cookie 使用 Windows DPAPI 加密，仅当前 Windows 用户可解密
 
 ## 安装
@@ -95,7 +95,7 @@ Key 和 Cookie 只以 DPAPI 密文保存在本机，绑定当前 Windows 用户�
 
 - 名称：TrafficMonitor AI Balance
 - 作者：StephenBoyMi
-- 版本：2.2.0
+- 版本：2.2.1
 - 链接：https://github.com/StephenBoyMi/trafficmonitor-ai-balance
 
 ## 从源码构建

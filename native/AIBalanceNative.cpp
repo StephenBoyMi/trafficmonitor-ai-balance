@@ -2327,6 +2327,11 @@ namespace
     {
         if (InterlockedCompareExchange(&g_optionsBusy, 1, 0) != 0)
         {
+            // 已经开着：把它还原并带到前台，不再新建第二个，也不静默忽略。
+            if (vb_options::RaiseOpenDialog())
+            {
+                Log(L"供应商对话框已开着，还原并置前");
+            }
             return false;
         }
         bool changed = false;
@@ -2504,7 +2509,7 @@ namespace
             case TMI_COPYRIGHT:
                 return L"© 2026 StephenBoyMi";
             case TMI_VERSION:
-                return L"2.2.0";
+                return L"2.2.1";
             case TMI_URL:
                 return L"https://github.com/StephenBoyMi/trafficmonitor-ai-balance";
             default:

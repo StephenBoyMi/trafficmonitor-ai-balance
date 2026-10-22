@@ -1012,6 +1012,10 @@ namespace vb_options
                 {
                     SetStatus(state, L"当前没有供应商，请点击“新增”。", kColorMuted);
                 }
+                // 没有 WS_MINIMIZEBOX 时，系统菜单里的“最小化”其实仍然可用；
+                // 一旦最小化，这个窗口没有任务栏按钮，就再也点不回来了。
+                EnableMenuItem(GetSystemMenu(hwnd, FALSE), SC_MINIMIZE,
+                    MF_BYCOMMAND | MF_GRAYED);
                 return 0;
             }
             case WM_COMMAND:
@@ -1230,6 +1234,13 @@ namespace vb_options
                 EndPaint(hwnd, &ps);
                 return 0;
             }
+            case WM_SYSCOMMAND:
+                // 双保险：即使“最小化”从别的路径触发也不让它生效。
+                if ((wParam & 0xFFF0) == SC_MINIMIZE)
+                {
+                    return 0;
+                }
+                break;
             case WM_CLOSE:
                 DestroyWindow(state->hwnd);
                 return 0;
@@ -1385,7 +1396,9 @@ namespace vb_options
         }
         state->dpi = dpi;
         RECT client = { 0, 0, Scaled(state, kClientWidth), Scaled(state, kClientHeight) };
-        DWORD style = WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
+        // 故意不给 WS_MINIMIZEBOX：属主是 TrafficMonitor 的工具窗口，
+        // 最小化后任务栏不会给出按钮，窗口就再也点不回来了。
+        DWORD style = WS_CAPTION | WS_SYSMENU;
         DWORD exStyle = WS_EX_DLGMODALFRAME;
         AdjustWindowRectExForDpiFunc adjust = reinterpret_cast<AdjustWindowRectExForDpiFunc>(
             reinterpret_cast<void*>(GetProcAddress(
@@ -1468,5 +1481,55 @@ namespace vb_options
         }
         delete state;
         return changed;
+    }
+
+    namespace
+    {
+        struct FindDialogData
+        {
+            DWORD pid;
+            HWND hwnd;
+        };
+
+        BOOL CALLBACK FindDialogProc(HWND hwnd, LPARAM lParam)
+        {
+            FindDialogData* data = reinterpret_cast<FindDialogData*>(lParam);
+            wchar_t className[64] = L"";
+            GetClassNameW(hwnd, className, 64);
+            if (wcscmp(className, kWindowClass) != 0)
+            {
+                return TRUE;
+            }
+            DWORD pid = 0;
+            GetWindowThreadProcessId(hwnd, &pid);
+            if (pid == data->pid)
+            {
+                data->hwnd = hwnd;
+                return FALSE;
+            }
+            return TRUE;
+        }
+    }
+
+    bool RaiseOpenDialog()
+    {
+        // 只认本进程的窗口：同时跑多个 TrafficMonitor 时，别人的同名窗口既点不动也不该去点。
+        FindDialogData data = { GetCurrentProcessId(), nullptr };
+        EnumThreadWindows(GetCurrentThreadId(), FindDialogProc,
+            reinterpret_cast<LPARAM>(&data));
+        if (data.hwnd == nullptr)
+        {
+            EnumWindows(FindDialogProc, reinterpret_cast<LPARAM>(&data));
+        }
+        if (data.hwnd == nullptr)
+        {
+            return false;
+        }
+        if (IsIconic(data.hwnd))
+        {
+            ShowWindow(data.hwnd, SW_RESTORE);
+        }
+        SetForegroundWindow(data.hwnd);
+        return true;
     }
 }

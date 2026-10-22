@@ -62,4 +62,8 @@ namespace vb_options
     // 以模态方式打开对话框。
     // 返回 true 表示用户在对话框里保存过设置。
     bool ShowOptionsDialog(void* hParent, const OptionsHost& host);
+
+    // 对话框已经开着时（例如被最小化藏起来），把它还原并带到前台。
+    // 返回 true 表示确实存在这样一个窗口。
+    bool RaiseOpenDialog();
 }
