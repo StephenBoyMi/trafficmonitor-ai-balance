@@ -97,7 +97,7 @@ Key 和 Cookie 只以 DPAPI 密文保存在本机，绑定当前 Windows 用户�
 
 - 名称：TrafficMonitor AI Balance
 - 作者：StephenBoyMi
-- 版本：2.2.3
+- 版本：2.2.4
 - 链接：https://github.com/StephenBoyMi/trafficmonitor-ai-balance
 
 ## 从源码构建

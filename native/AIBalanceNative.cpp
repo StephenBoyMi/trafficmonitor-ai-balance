@@ -1118,13 +1118,12 @@ namespace
         return true;
     }
 
-    // 比例型用量（0-1）统一折算成“剩余/已用百分比”，并标记为官方口径。
+    // 比例型用量（0-1）统一折算成“剩余/已用百分比”。
     void ApplyPercentUsage(Provider& provider, double percentage, bool weekly)
     {
         provider.weeklyPeriod = weekly;
         provider.balance = (1.0 - percentage) * 100.0;
         provider.spentToday = percentage * 100.0;
-        provider.spentIsOfficial = true;
     }
 
     bool QueryTokenPlan(Provider& provider, std::string& error)
@@ -1538,7 +1537,6 @@ namespace
                     provider.hasBalance = g_providers[j].hasBalance;
                     provider.balance = g_providers[j].balance;
                     provider.spentToday = g_providers[j].spentToday;
-                    provider.spentIsOfficial = g_providers[j].spentIsOfficial;
                     provider.day = g_providers[j].day;
                     provider.lastChangeTicks = g_providers[j].lastChangeTicks;
                     break;
@@ -2523,7 +2521,7 @@ namespace
             case TMI_COPYRIGHT:
                 return L"© 2026 StephenBoyMi";
             case TMI_VERSION:
-                return L"2.2.3";
+                return L"2.2.4";
             case TMI_URL:
                 return L"https://github.com/StephenBoyMi/trafficmonitor-ai-balance";
             default:
