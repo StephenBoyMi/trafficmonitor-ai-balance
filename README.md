@@ -10,7 +10,7 @@
 - 一次显示一家；15 分钟内余额有变化的多家供应商每 30 秒轮换
 - 支持 Sub2API、DeepSeek、Kimi、One-API
 - 支持千问 Token Plan 和小米 Token Plan 用量：第一行剩余百分比，第二行本周或本月已用百分比
-- 今日消费优先使用官方用量；官方当天值为 0 或没有当天值时改用余额下降累计；DeepSeek、Kimi 使用余额差
+- 今日消费按余额下降累计（账户级），接口报的今日用量按 key 统计、只当下限兜底；DeepSeek、Kimi 只有余额差
 - 内置供应商管理：新增、编辑、删除、拖动排序、测试连接、保存；列表里每家名称后面带当前数值，一处看全所有供应商；窗口已开着时再双击，会把它带到前台
 - Key 和 Cookie 使用 Windows DPAPI 加密，仅当前 Windows 用户可解密
 
@@ -32,16 +32,16 @@
 
 | 类型 | 余额 | 今日消费 |
 |---|---|---|
-| Sub2API | `balance` / `remaining` | 官方 `usage.today.actual_cost` |
+| Sub2API | `balance` / `remaining` | 余额下降累计，官方 `usage.today.actual_cost` 兜底 |
 | DeepSeek 官方 | `balance_infos[].total_balance` | 余额下降估算 |
 | Kimi / Moonshot 官方 | `data.available_balance` | 余额下降估算 |
-| One-API / New-API | `hard_limit_usd - total_usage / 100` | 官方当天用量 |
+| One-API / New-API | `hard_limit_usd - total_usage / 100` | 余额下降累计，官方当天用量兜底 |
 | 千问 Token Plan 个人版 | 100% − 周期已用比例 | 官方周期已用比例 |
 | 小米 Token Plan | 100% − 本月已用比例 | 官方本月已用比例 |
 
 Token Plan 没有金额余额，两行都按百分比显示，第二行的周期取接口返回：有 `per1WeekPercentage` 显示“本周”，否则显示“本月”。小米 Token Plan 只有月度字段，第二行固定“本月”。
 
-Sub2API 和 One-API 的当天用量按 key 统计，同一账户下别的 key 在消费时这把 key 会返回 0，而余额是账户级的：当天值为 0 时不按官方值，改用余额下降累计，这样“今日”和余额的掉法保持一致。
+Sub2API 和 One-API 的当天用量按 key 统计，余额是账户级的：同一个账户下用多把 key 时，接口报的“今日”只覆盖其中一把。所以今日消费默认按余额下降累计，接口报的值只当“至少花了这么多”的下限，两者取大——多 key 时由余额差说话，插件漏看一段时由官方值兜底。
 
 ## 显示规则
 
@@ -97,7 +97,7 @@ Key 和 Cookie 只以 DPAPI 密文保存在本机，绑定当前 Windows 用户�
 
 - 名称：TrafficMonitor AI Balance
 - 作者：StephenBoyMi
-- 版本：2.2.2
+- 版本：2.2.3
 - 链接：https://github.com/StephenBoyMi/trafficmonitor-ai-balance
 
 ## 从源码构建

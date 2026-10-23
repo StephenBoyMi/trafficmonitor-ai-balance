@@ -43,6 +43,8 @@ namespace
         double balance;
         double spentToday;
         bool spentIsOfficial;
+        // 接口报的今日花费：只统计这一把 key，作为“至少花了这么多”的下限。
+        double officialSpentToday;
         // Token Plan 返回的是周期用量比例而不是金额；周期由查询结果决定。
         bool weeklyPeriod;
         std::string day;
@@ -52,7 +54,8 @@ namespace
 
         Provider()
             : sortOrder(0), hasBalance(false), balance(0), spentToday(0),
-              spentIsOfficial(false), weeklyPeriod(false), lastChangeTicks(0)
+              spentIsOfficial(false), officialSpentToday(0), weeklyPeriod(false),
+              lastChangeTicks(0)
         {
         }
     };
@@ -1362,11 +1365,10 @@ namespace
             {
                 double todayUnits = 0;
                 std::string todayError;
-                // 同上：今日 total_usage 为 0 时不当数，退回余额差累计。
-                if (ParseOneApiUsageTotal(todayResult.body, todayUnits, todayError)
-                    && todayUnits > 0.0)
+                // 同 Sub2API：官方今日用量只作下限，不足部分由余额差补。
+                if (ParseOneApiUsageTotal(todayResult.body, todayUnits, todayError))
                 {
-                    provider.spentToday = todayUnits / 100.0;
+                    provider.officialSpentToday = todayUnits / 100.0;
                     provider.spentIsOfficial = true;
                 }
             }
@@ -1396,12 +1398,12 @@ namespace
         {
             return false;
         }
-        // 官方今日值是 0 时不当数：Sub2API 的 usage 按 key 统计，同一账户下别的
-        // key 在花钱时这把 key 会一直报 0，而余额是账户级的，此时退回余额差累计。
-        provider.spentIsOfficial = hasOfficialSpent && officialSpent > 0.0;
-        if (provider.spentIsOfficial)
+        // usage 按 key 统计、余额按账户：官方值只当“至少花了这么多”，
+        // 由 RefreshOnce 与余额差取大。
+        provider.spentIsOfficial = hasOfficialSpent;
+        if (hasOfficialSpent)
         {
-            provider.spentToday = officialSpent;
+            provider.officialSpentToday = officialSpent;
         }
         return true;
     }
@@ -1802,10 +1804,9 @@ namespace
             }
             provider.lastError.clear();
 
-            if (provider.spentIsOfficial)
+            if (IsPercentProvider(provider))
             {
-                // VANKIT/Zhumeng and One-API expose official daily usage;
-                // never mix it with the balance-drop estimate.
+                // 百分比类：官方周期用量就是全部，余额（百分比）不能再叠加。
                 provider.day = today;
             }
             else
@@ -1840,6 +1841,14 @@ namespace
                     {
                         provider.spentToday += decrease;
                     }
+                }
+
+                // 官方值只统计这把 key，余额差是整个账户，两者都是“至少花了这么多”。
+                // 取大的那个：多 key 账户由余额差说话，漏看一段时官方值兜底。
+                if (provider.spentIsOfficial
+                    && provider.officialSpentToday > provider.spentToday)
+                {
+                    provider.spentToday = provider.officialSpentToday;
                 }
             }
 
@@ -2514,7 +2523,7 @@ namespace
             case TMI_COPYRIGHT:
                 return L"© 2026 StephenBoyMi";
             case TMI_VERSION:
-                return L"2.2.2";
+                return L"2.2.3";
             case TMI_URL:
                 return L"https://github.com/StephenBoyMi/trafficmonitor-ai-balance";
             default:
