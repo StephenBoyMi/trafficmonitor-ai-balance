@@ -1356,12 +1356,15 @@ namespace
                 + L"?start_date=" + WideFromUtf8(LocalDayString())
                 + L"&end_date=" + WideFromUtf8(endDate);
             HttpResult todayResult = HttpGet(todayUsageUrl, provider.key);
+            provider.spentIsOfficial = false;
             if (todayResult.error.empty()
                 && todayResult.status >= 200 && todayResult.status < 300)
             {
                 double todayUnits = 0;
                 std::string todayError;
-                if (ParseOneApiUsageTotal(todayResult.body, todayUnits, todayError))
+                // 同上：今日 total_usage 为 0 时不当数，退回余额差累计。
+                if (ParseOneApiUsageTotal(todayResult.body, todayUnits, todayError)
+                    && todayUnits > 0.0)
                 {
                     provider.spentToday = todayUnits / 100.0;
                     provider.spentIsOfficial = true;
@@ -1393,10 +1396,12 @@ namespace
         {
             return false;
         }
-        if (hasOfficialSpent)
+        // 官方今日值是 0 时不当数：Sub2API 的 usage 按 key 统计，同一账户下别的
+        // key 在花钱时这把 key 会一直报 0，而余额是账户级的，此时退回余额差累计。
+        provider.spentIsOfficial = hasOfficialSpent && officialSpent > 0.0;
+        if (provider.spentIsOfficial)
         {
             provider.spentToday = officialSpent;
-            provider.spentIsOfficial = true;
         }
         return true;
     }
@@ -2509,7 +2514,7 @@ namespace
             case TMI_COPYRIGHT:
                 return L"© 2026 StephenBoyMi";
             case TMI_VERSION:
-                return L"2.2.1";
+                return L"2.2.2";
             case TMI_URL:
                 return L"https://github.com/StephenBoyMi/trafficmonitor-ai-balance";
             default:
